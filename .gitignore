@@ -1,0 +1,14 @@
+node_modules/
+dist/
+coverage/
+artifacts/
+cache/
+typechain-types/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.env
+.env.*
+!.env.example
+benchmark-output.json
+npm-debug.log*
