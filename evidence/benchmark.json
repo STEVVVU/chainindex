@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "workload": {
+    "provider": "deterministic in-process fake chain",
+    "blocks": 10000,
+    "logsPerBlock": 1,
+    "batchSize": 500,
+    "storage": "SQLite :memory:",
+    "confirmations": 0
+  },
+  "result": {
+    "indexedBlocks": 10000,
+    "indexedEvents": 10000,
+    "elapsedSeconds": 5.432,
+    "blocksPerSecond": 1841
+  },
+  "runtime": {
+    "node": "v24.16.0",
+    "platform": "win32-x64"
+  }
+}
