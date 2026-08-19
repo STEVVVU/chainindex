@@ -1,10 +1,32 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+
 /// @title SafeEscrow
 /// @notice Holds native ETH until a payer, payee, or designated arbiter settles it.
 /// @dev This reference implementation has not received an external security audit.
-contract SafeEscrow {
+///
+/// @dev Authorization is split across two deliberately separate layers:
+///
+///      1. **Per-escrow settlement authority** (`payer`, `payee`, `arbiter`) lives in
+///         each {Escrow} record and is checked inline. This is intentionally *not*
+///         modelled with OpenZeppelin {AccessControl}: `AccessControl` keeps a single
+///         contract-wide `role => account` registry, so granting an `ARBITER_ROLE`
+///         would authorize that account against **every** escrow rather than the one
+///         it was named on. Per-escrow parties are relationship data, not global
+///         permissions, so they stay in storage.
+///      2. **Contract-wide operational authority** uses {AccessControl}. Its only
+///         privileged capability is the {Pausable} circuit breaker over {deposit}.
+///
+///      The breaker is deliberately inflow-only: {release} and {refund} are never
+///      pausable, so no admin — including a compromised admin key — can freeze,
+///      seize, or strand ETH that is already escrowed. Funded escrows always stay
+///      settleable by their own parties. The Hardhat suite and the Foundry invariant
+///      suite both assert this property directly.
+contract SafeEscrow is AccessControl, Pausable, ReentrancyGuard {
     enum Status {
         None,
         Funded,
@@ -21,6 +43,10 @@ contract SafeEscrow {
         Status status;
     }
 
+    /// @notice Role permitted to pause and unpause new deposits.
+    /// @dev Holders cannot release, refund, or otherwise reach escrowed ETH.
+    bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
+
     error AmountRequired();
     error InvalidAddress();
     error InvalidDeadline();
@@ -28,7 +54,6 @@ contract SafeEscrow {
     error Unauthorized();
     error RefundNotAvailable();
     error TransferFailed();
-    error ReentrantCall();
     error AmountTooLarge();
 
     event Deposited(
@@ -45,13 +70,26 @@ contract SafeEscrow {
     uint256 public nextEscrowId = 1;
     mapping(uint256 escrowId => Escrow escrow) public escrows;
 
-    uint256 private locked = 1;
+    /// @notice Assigns the contract-wide administrative roles.
+    /// @param admin Account granted `DEFAULT_ADMIN_ROLE` and `PAUSER_ROLE`.
+    /// @dev The admin governs the deposit circuit breaker only; it holds no settlement
+    ///      authority over any escrow. The zero address is rejected so the breaker
+    ///      cannot be deployed unowned.
+    constructor(address admin) {
+        if (admin == address(0)) revert InvalidAddress();
+        _grantRole(DEFAULT_ADMIN_ROLE, admin);
+        _grantRole(PAUSER_ROLE, admin);
+    }
 
-    modifier nonReentrant() {
-        if (locked != 1) revert ReentrantCall();
-        locked = 2;
-        _;
-        locked = 1;
+    /// @notice Stops acceptance of new deposits.
+    /// @dev Settlement of already-funded escrows is unaffected by design.
+    function pause() external onlyRole(PAUSER_ROLE) {
+        _pause();
+    }
+
+    /// @notice Resumes acceptance of new deposits.
+    function unpause() external onlyRole(PAUSER_ROLE) {
+        _unpause();
     }
 
     /// @notice Creates and funds an escrow.
@@ -62,7 +100,7 @@ contract SafeEscrow {
         address payable payee,
         address arbiter,
         uint64 refundAfter
-    ) external payable nonReentrant returns (uint256 escrowId) {
+    ) external payable nonReentrant whenNotPaused returns (uint256 escrowId) {
         if (msg.value == 0) revert AmountRequired();
         if (payee == address(0) || payee == msg.sender || arbiter == msg.sender || arbiter == payee) {
             revert InvalidAddress();
@@ -84,6 +122,7 @@ contract SafeEscrow {
     }
 
     /// @notice Pays the escrow to the payee. The payer or arbiter may authorize.
+    /// @dev Never pausable: settlement must stay available to the escrow's own parties.
     function release(uint256 escrowId) external nonReentrant {
         Escrow storage escrow = escrows[escrowId];
         if (escrow.status != Status.Funded) revert EscrowNotFunded();
@@ -101,6 +140,7 @@ contract SafeEscrow {
 
     /// @notice Returns the escrow to the payer.
     /// @dev Payee and arbiter may refund immediately; payer must wait for refundAfter.
+    /// @dev Never pausable: settlement must stay available to the escrow's own parties.
     function refund(uint256 escrowId) external nonReentrant {
         Escrow storage escrow = escrows[escrowId];
         if (escrow.status != Status.Funded) revert EscrowNotFunded();

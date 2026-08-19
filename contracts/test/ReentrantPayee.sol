@@ -10,6 +10,11 @@ contract ReentrantPayee {
     ISafeEscrow public immutable escrow;
     uint256 public targetId;
     bool public reentryBlocked;
+    /// @notice Raw revert data returned by the blocked reentrant call.
+    /// @dev Lets tests assert *which* guard rejected the reentry rather than merely
+    ///      that some revert occurred. Expected to carry the four-byte selector of
+    ///      OpenZeppelin's `ReentrancyGuardReentrantCall()`.
+    bytes public reentryRevertData;
 
     constructor(ISafeEscrow escrow_) {
         escrow = escrow_;
@@ -22,8 +27,9 @@ contract ReentrantPayee {
     receive() external payable {
         try escrow.release(targetId) {
             reentryBlocked = false;
-        } catch {
+        } catch (bytes memory reason) {
             reentryBlocked = true;
+            reentryRevertData = reason;
         }
     }
 }

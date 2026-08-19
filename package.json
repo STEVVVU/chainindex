@@ -20,6 +20,7 @@
     "dev": "tsx src/cli.ts"
   },
   "dependencies": {
+    "@openzeppelin/contracts": "5.6.1",
     "better-sqlite3": "^12.2.0",
     "ethers": "^6.15.0",
     "fastify": "^5.6.1",

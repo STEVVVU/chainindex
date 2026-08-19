@@ -5,14 +5,14 @@ describe("SafeEscrow", () => {
   const amount = ethers.parseEther("1");
 
   async function deployFixture() {
-    const [payer, payee, arbiter, outsider] = await ethers.getSigners();
+    const [admin, payer, payee, arbiter, outsider] = await ethers.getSigners();
     const factory = await ethers.getContractFactory("SafeEscrow");
-    const escrow = await factory.deploy();
+    const escrow = await factory.deploy(admin.address);
     await escrow.waitForDeployment();
     const latest = await ethers.provider.getBlock("latest");
     if (latest === null) throw new Error("Latest block unavailable");
     const deadline = latest.timestamp + 3_600;
-    return { escrow, payer, payee, arbiter, outsider, deadline };
+    return { escrow, admin, payer, payee, arbiter, outsider, deadline };
   }
 
   it("records a funded escrow and emits all indexed identities", async () => {
@@ -202,5 +202,82 @@ describe("SafeEscrow", () => {
     expect(await attacker.reentryBlocked()).to.equal(true);
     expect((await escrow.escrows(1n)).status).to.equal(2n);
     expect(await ethers.provider.getBalance(await attacker.getAddress())).to.equal(amount);
+
+    // Assert the OpenZeppelin guard is what rejected the reentry, not an incidental
+    // revert. This is the check that proves the hand-rolled guard was replaced by an
+    // equivalent (audited) one rather than silently dropped.
+    const expectedSelector = ethers
+      .id("ReentrancyGuardReentrantCall()")
+      .slice(0, 10);
+    expect(await attacker.reentryRevertData()).to.equal(expectedSelector);
+  });
+
+  it("grants the deposit circuit breaker to the deployer-nominated admin only", async () => {
+    const { escrow, admin, outsider } = await deployFixture();
+    const pauserRole = await escrow.PAUSER_ROLE();
+    const adminRole = await escrow.DEFAULT_ADMIN_ROLE();
+
+    expect(await escrow.hasRole(pauserRole, admin.address)).to.equal(true);
+    expect(await escrow.hasRole(adminRole, admin.address)).to.equal(true);
+    expect(await escrow.hasRole(pauserRole, outsider.address)).to.equal(false);
+
+    await expect(escrow.connect(outsider).pause())
+      .to.be.revertedWithCustomError(escrow, "AccessControlUnauthorizedAccount")
+      .withArgs(outsider.address, pauserRole);
+  });
+
+  it("rejects deployment without an admin so the breaker cannot be unowned", async () => {
+    const factory = await ethers.getContractFactory("SafeEscrow");
+    await expect(
+      factory.deploy(ethers.ZeroAddress)
+    ).to.be.revertedWithCustomError(factory, "InvalidAddress");
+  });
+
+  it("pauses new deposits and resumes them after unpause", async () => {
+    const { escrow, admin, payer, payee, arbiter, deadline } = await deployFixture();
+
+    await escrow.connect(admin).pause();
+    await expect(
+      escrow
+        .connect(payer)
+        .deposit(payee.address, arbiter.address, deadline, { value: amount })
+    ).to.be.revertedWithCustomError(escrow, "EnforcedPause");
+
+    await escrow.connect(admin).unpause();
+    await expect(
+      escrow
+        .connect(payer)
+        .deposit(payee.address, arbiter.address, deadline, { value: amount })
+    ).to.emit(escrow, "Deposited");
+  });
+
+  it("never lets the pause admin freeze, seize, or strand escrowed ETH", async () => {
+    const { escrow, admin, payer, payee, arbiter, deadline } = await deployFixture();
+    await escrow
+      .connect(payer)
+      .deposit(payee.address, arbiter.address, deadline, { value: amount });
+    await escrow
+      .connect(payer)
+      .deposit(payee.address, arbiter.address, deadline, { value: amount });
+
+    // The breaker is inflow-only: it must not reach ETH that is already escrowed.
+    await escrow.connect(admin).pause();
+
+    // The admin itself has no settlement authority over an escrow it is not party to.
+    await expect(
+      escrow.connect(admin).release(1n)
+    ).to.be.revertedWithCustomError(escrow, "Unauthorized");
+    await expect(
+      escrow.connect(admin).refund(1n)
+    ).to.be.revertedWithCustomError(escrow, "Unauthorized");
+
+    // Both settlement paths stay open to the escrow's own parties while paused.
+    await expect(escrow.connect(payer).release(1n))
+      .to.emit(escrow, "Released")
+      .withArgs(1n, payer.address, payee.address, amount);
+    await expect(escrow.connect(payee).refund(2n))
+      .to.emit(escrow, "Refunded")
+      .withArgs(2n, payee.address, payer.address, amount);
+    expect(await ethers.provider.getBalance(await escrow.getAddress())).to.equal(0n);
   });
 });
