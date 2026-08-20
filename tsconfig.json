@@ -14,7 +14,9 @@
   "include": [
     "src/**/*.ts",
     "tests/indexer/**/*.ts",
+    "tests/e2e/**/*.ts",
     "benchmarks/**/*.ts",
-    "hardhat.config.ts"
+    "hardhat.config.ts",
+    "vitest.e2e.config.ts"
   ]
 }

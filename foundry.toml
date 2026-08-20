@@ -1,0 +1,42 @@
+[profile.default]
+# Foundry sits alongside Hardhat rather than replacing it. Hardhat owns the
+# behavioural/integration suite (tests/contract, TypeScript + ethers v6);
+# Foundry owns fuzz and invariant testing (tests/foundry, Solidity), which is
+# what Hardhat cannot express well.
+src = "contracts"
+test = "tests/foundry"
+out = "out"
+cache_path = "cache/foundry"
+
+# Match the deterministic solc pin used by hardhat.config.ts. Both toolchains must
+# compile the same bytecode, so this version and the Hardhat
+# TASK_COMPILE_SOLIDITY_GET_SOLC_BUILD override have to move together.
+solc = "0.8.28"
+evm_version = "paris"
+optimizer = true
+optimizer_runs = 200
+
+# OpenZeppelin is installed by npm (it is a runtime Solidity dependency declared in
+# package.json), while forge-std is a Foundry-only test dependency in lib/.
+libs = ["lib", "node_modules"]
+remappings = [
+  "@openzeppelin/contracts/=node_modules/@openzeppelin/contracts/",
+  "forge-std/=lib/forge-std/src/"
+]
+
+[profile.default.fuzz]
+runs = 512
+
+[profile.default.invariant]
+runs = 256
+depth = 32
+fail_on_revert = false
+
+# CI trades breadth for wall-clock: fewer, deeper runs.
+[profile.ci.fuzz]
+runs = 1024
+
+[profile.ci.invariant]
+runs = 128
+depth = 64
+fail_on_revert = false

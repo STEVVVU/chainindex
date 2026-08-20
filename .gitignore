@@ -3,6 +3,8 @@ dist/
 coverage/
 artifacts/
 cache/
+out/
+lib/forge-std/
 typechain-types/
 *.sqlite
 *.sqlite-shm
