@@ -1,0 +1,143 @@
+# Local observability + chain stack:
+#
+#   anvil       -> a real EVM node (Foundry) on 8545
+#   deployer    -> one-shot: deploys SafeEscrow, writes the address for the indexer
+#   indexer     -> this service, indexing the deployed escrow, API + /metrics on 3000
+#   prometheus  -> scrapes the indexer's /metrics
+#   grafana     -> dashboards over Prometheus
+#
+# Start with:  docker compose up --build
+# Then:        http://localhost:3000/health, :9090 (Prometheus), :3001 (Grafana)
+#
+# Everything here is a disposable local chain. The mnemonic below is anvil's published
+# default; it is test-only and holds no value on any real network.
+
+name: chainindex
+
+services:
+  anvil:
+    image: ghcr.io/foundry-rs/foundry:v1.4.1
+    # `anvil` needs a shell-form entrypoint override because the image's default
+    # entrypoint expects a single quoted command string.
+    entrypoint: ["anvil"]
+    command:
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8545"
+      - --chain-id
+      - "31337"
+      - --block-time
+      - "2"
+      # anvil's well-known public test mnemonic. TEST ONLY - never reuse this.
+      - --mnemonic
+      - "test test test test test test test test test test test junk"
+    ports:
+      - "8545:8545"
+    healthcheck:
+      test:
+        - CMD
+        - cast
+        - block-number
+        - --rpc-url
+        - http://127.0.0.1:8545
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  # One-shot job: compiles and deploys SafeEscrow to anvil, then writes the resulting
+  # address and deployment block to a shared volume. The indexer needs both, and
+  # hardcoding them would break whenever the chain is reset.
+  deployer:
+    image: ghcr.io/foundry-rs/foundry:v1.4.1
+    entrypoint: ["/bin/sh", "/scripts/deploy-escrow.sh"]
+    environment:
+      RPC_URL: http://anvil:8545
+      # anvil account 0, derived from the published test mnemonic above. TEST ONLY.
+      PRIVATE_KEY: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+      OUT_DIR: /deployment
+    volumes:
+      - ./scripts:/scripts:ro
+      - ./contracts:/contracts:ro
+      - deployment:/deployment
+    depends_on:
+      anvil:
+        condition: service_healthy
+
+  indexer:
+    build:
+      context: .
+    environment:
+      RPC_URL: http://anvil:8545
+      CHAIN_ID: "31337"
+      DATABASE_PATH: /data/chainindex.sqlite
+      # anvil mines every 2s, so a shallow confirmation depth keeps the demo responsive.
+      # Public networks warrant the default of 12.
+      CONFIRMATIONS: "2"
+      BATCH_SIZE: "500"
+      RPC_REQUESTS_PER_SECOND: "20"
+      HOST: 0.0.0.0
+      PORT: "3000"
+    # CONTRACT_ADDRESS and START_BLOCK are produced by the deployer, so the entrypoint
+    # sources them before starting the service.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        until [ -f /deployment/escrow.env ]; do
+          echo "waiting for escrow deployment..."
+          sleep 2
+        done
+        . /deployment/escrow.env
+        export CONTRACT_ADDRESS START_BLOCK
+        echo "indexing $$CONTRACT_ADDRESS from block $$START_BLOCK"
+        exec node dist/cli.js serve
+    ports:
+      - "3000:3000"
+    volumes:
+      - indexer-data:/data
+      - deployment:/deployment:ro
+    depends_on:
+      anvil:
+        condition: service_healthy
+      deployer:
+        condition: service_completed_successfully
+
+  prometheus:
+    image: prom/prometheus:v3.7.3
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    depends_on:
+      - indexer
+
+  grafana:
+    image: grafana/grafana:12.3.1
+    environment:
+      # Local-only convenience: anonymous admin so the dashboards open without a login
+      # prompt. Never do this on anything reachable beyond localhost.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - "3001:3000"
+    volumes:
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
+volumes:
+  indexer-data:
+  deployment:
+  prometheus-data:
+  grafana-data:
