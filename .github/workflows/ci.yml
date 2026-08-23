@@ -9,18 +9,66 @@ permissions:
   contents: read
 
 jobs:
+  # Lint, typecheck, build, the fake-provider unit tier, the Hardhat contract tier,
+  # the real-node E2E tier, and the benchmark.
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
+
+      # Installs forge and anvil. The E2E suite prefers anvil when it is on PATH and
+      # falls back to `hardhat node` otherwise, so this makes CI exercise the anvil
+      # backend specifically rather than only the Hardhat one.
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      - run: forge --version
+      - run: anvil --version
+
       - run: npm ci
       - run: npm run lint
       - run: npm run typecheck
       - run: npm run build
-      - run: npm test
+      - run: npm run test:indexer
+      - run: npm run test:contract
+      - run: npm run test:e2e
       - run: BENCHMARK_BLOCKS=2000 npm run benchmark
+
+  # Foundry fuzz and invariant suite. A separate job so a fuzz failure is
+  # distinguishable from a deterministic test failure, and so it runs concurrently.
+  invariant:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      # forge-std is a Foundry-only test dependency, fetched here rather than vendored
+      # as a submodule so `npm ci` stays the single bootstrap step for the TS side.
+      - name: Install forge-std
+        run: forge install foundry-rs/forge-std@v1.16.2
+
+      # OpenZeppelin resolves from node_modules via the remapping in foundry.toml, so
+      # the npm install must precede compiling contracts with forge.
+      - run: npm ci
+
+      - name: Verify Foundry compiles against the same pinned solc as Hardhat
+        run: forge build --use 0.8.28
+
+      - name: Fuzz and invariant tests
+        run: forge test -vvv
+        env:
+          FOUNDRY_PROFILE: ci
