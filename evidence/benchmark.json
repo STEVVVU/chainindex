@@ -1,18 +1,27 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "workload": {
     "provider": "deterministic in-process fake chain",
     "blocks": 10000,
     "logsPerBlock": 1,
     "batchSize": 500,
     "storage": "SQLite :memory:",
-    "confirmations": 0
+    "confirmations": 0,
+    "repeats": 5
   },
   "result": {
     "indexedBlocks": 10000,
     "indexedEvents": 10000,
-    "elapsedSeconds": 5.432,
-    "blocksPerSecond": 1841
+    "elapsedSeconds": {
+      "min": 7.393,
+      "median": 8.304,
+      "max": 10.692
+    },
+    "blocksPerSecond": {
+      "min": 935,
+      "median": 1204,
+      "max": 1353
+    }
   },
   "runtime": {
     "node": "v24.16.0",
