@@ -50,6 +50,22 @@ would move the same constraints and transactions to PostgreSQL.
 bounded exponential retries. `FakeChainProvider` deterministically mines and
 replaces blocks for tests and benchmarks.
 
+Because the boundary is this narrow, the same `EthersJsonRpcProvider` used in production
+is what the real-node E2E suite drives against anvil or `hardhat node` — the tests
+substitute the *chain*, not the client. That is also why the ethers-to-viem question is a
+contained one; see the README's dependency rationale.
+
+## Test Topology
+
+- `tests/indexer/`: `FakeChainProvider`, in-memory SQLite, no I/O. Fast tier.
+- `tests/e2e/`: a real node over HTTP with the real compiled escrow, including a
+  snapshot/revert reorg that forces genuine block-hash divergence.
+- `tests/contract/`: Hardhat behavioural and adversarial contract tests.
+- `tests/foundry/`: Solidity fuzz and invariant tests over the escrow's state space.
+
+The fake tier proves the logic; the real-node tier proves the logic holds against an
+actual JSON-RPC implementation. Both are kept because they fail for different reasons.
+
 ## API
 
 - `GET /health`

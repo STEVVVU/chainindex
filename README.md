@@ -14,9 +14,10 @@ It does not define or promote a token.
 - Added a rate-limited JSON-RPC abstraction, resumable range backfills, a
   cursor-paginated Fastify API, Prometheus metrics, and fake-chain integration
   tests covering failures and competing forks.
-- Implemented and tested a Solidity ETH escrow with payer/payee/arbiter access
-  control, timeout refunds, custom errors, event audit trails,
-  checks-effects-interactions, and callback reentrancy protection.
+- Implemented and tested a Solidity ETH escrow on OpenZeppelin `ReentrancyGuard`,
+  `AccessControl`, and `Pausable`, with payer/payee/arbiter settlement authority,
+  timeout refunds, custom errors, event audit trails,
+  checks-effects-interactions, and Foundry fuzz/invariant coverage.
 
 ## Components
 
@@ -25,14 +26,45 @@ It does not define or promote a token.
 - `src/provider/`: ethers JSON-RPC adapter, retry/rate wrapper, and fake chain.
 - `src/api.ts`: read-only event, checkpoint, backfill, health, and metrics routes.
 - `contracts/SafeEscrow.sol`: deposit, release, and refund lifecycle.
-- `tests/`: deterministic indexer and local Hardhat contract suites.
+- `tests/`: three test tiers (see [Testing](#testing)).
 
 See [architecture](docs/ARCHITECTURE.md) and
 [threat model](docs/THREAT_MODEL.md) for invariants and trust assumptions.
 
+## Dependency Rationale
+
+| Dependency | Why |
+| --- | --- |
+| `@openzeppelin/contracts` 5.6.1 | Audited `ReentrancyGuard`, `AccessControl`, and `Pausable` in place of hand-rolled equivalents. Requires `^0.8.20`, compatible with the pinned 0.8.28. |
+| `ethers` 6 | JSON-RPC access, ABI decoding, and the contract test suite. See the note below on viem. |
+| `better-sqlite3` | Synchronous, transactional embedded storage. Its single-writer model matches one indexer process per database. |
+| `fastify` | Read-only query API with schema validation and structured logging. |
+| `prom-client` | Prometheus-format metrics on `/metrics`, ready for any scraper. |
+| `zod` | Environment and query-parameter validation at process and HTTP boundaries. |
+| Hardhat + Foundry | Both, deliberately. Hardhat runs the TypeScript behavioural suite; Foundry runs Solidity fuzz and invariant tests. |
+
+### Why ethers, not viem
+
+`viem` is the more common choice for new indexers today: smaller bundles, a
+tree-shakeable modular API, and stricter TypeScript inference. It is a reasonable
+default for a greenfield project.
+
+This repository stays on **ethers v6** on purpose. All external chain access is already
+funnelled through the three-method `ChainProvider` interface in
+`src/provider/chain-provider.ts`, so the client library is an implementation detail of
+one 55-line adapter (`json-rpc-provider.ts`) plus ABI decoding in `decoder.ts`.
+Swapping it would touch those files and the contract test suite while changing no
+observable behaviour, no architecture, and no guarantee this project claims. ethers v6
+is actively maintained and widely deployed, so the migration would be churn presented as
+progress.
+
+The provider boundary is the point: the abstraction that makes anvil easy to substitute
+for the fake chain is the same one that would make viem a contained change if there were
+a reason to make it.
+
 ## Local Verification
 
-Prerequisites: Node.js 22+ and npm.
+Prerequisites: Node.js 22+ and npm. Foundry is optional (see [Testing](#testing)).
 
 ```bash
 npm ci
@@ -44,7 +76,86 @@ npm run benchmark
 ```
 
 The pinned `solc` JavaScript package is wired into Hardhat, so Solidity tests do
-not download a compiler after dependencies are installed.
+not download a compiler after dependencies are installed. `foundry.toml` pins the
+same 0.8.28, and CI asserts both toolchains compile against it — if you change the
+pin, change it in both places.
+
+## Testing
+
+Four tiers, each covering what the others cannot:
+
+| Tier | Command | What it proves |
+| --- | --- | --- |
+| Unit (fake chain) | `npm run test:indexer` | Indexer logic against `FakeChainProvider`: confirmations, idempotent replay, backfill resumption, fork rejection, metrics. Fast and hermetic. |
+| Contract (Hardhat) | `npm run test:contract` | Escrow behaviour and the adversarial cases — reentrancy via `ReentrantPayee`, ETH rejection via `RejectEther`, role and pause boundaries. |
+| Real node (E2E) | `npm run test:e2e` | The indexer against a genuine JSON-RPC node, including a real reorg. |
+| Fuzz + invariant | `npm run test:invariant` | Property-based coverage of the escrow. **Requires Foundry; CI-verified only** (see [Verification status](#verification-status)). |
+
+### Real-node testing
+
+The unit tier is fast but can only show the indexer is correct with respect to a fake
+written alongside it. `tests/e2e/` closes that gap: it deploys the compiled
+`SafeEscrow` to a real node, indexes its logs over HTTP through
+`EthersJsonRpcProvider`, and asserts stored block hashes match what the node reports.
+
+The reorg test matters most, because reorg-safety is this project's headline claim. It
+snapshots the chain, mines one history, reverts, then mines a **different** history with
+different transactions, so the node recomputes genuinely different block hashes. The
+test asserts the two histories' hashes actually diverge before asserting recovery, so it
+cannot pass vacuously. (Empty blocks are byte-identical after `evm_revert` because
+timestamps are deterministic — differing transactions are what create real divergence.)
+
+Both backends are **native binaries spawned as ordinary child processes** — no container
+runtime is involved anywhere in the test suite. The harness prefers **anvil** when it is
+on `PATH` and falls back to `hardhat node` otherwise; both expose
+`evm_snapshot`/`evm_revert`, so the suite passes either way. CI installs Foundry via
+`foundry-rs/foundry-toolchain@v1` so it exercises the anvil path specifically. The
+fake-provider tier is retained unchanged for fast, dependency-free feedback.
+
+### Verification status
+
+`test:indexer`, `test:contract`, and `test:e2e` were run locally on Windows and pass;
+the E2E tier ran on the `hardhat node` backend, since Foundry is not installed on that
+machine. The **anvil backend and the `test:invariant` tier are verified in CI only** —
+they need `forge`/`anvil` on `PATH`, which the toolchain action provides. Install
+Foundry locally (`foundryup`) to run both here.
+
+### Fuzz and invariant testing
+
+`tests/foundry/` asserts properties that must hold in *every* reachable state, which
+example-based tests cannot express:
+
+- contract balance always covers the sum of unreleased deposits;
+- no non-party — including the pause admin — can ever release or refund;
+- pausing never blocks settlement of an already-funded escrow;
+- settled escrows are terminal, and escrow ids are never reused.
+
+A handler (`SafeEscrowHandler.sol`) keeps the fuzzer inside the contract's documented
+preconditions, and a coverage invariant fails the run if no escrow was ever funded — so
+the suite cannot pass by exploring an empty state space.
+
+## Escrow Access Control
+
+`SafeEscrow` separates two kinds of authority, and the distinction is deliberate.
+
+**Per-escrow settlement authority** (`payer`, `payee`, `arbiter`) is stored per escrow
+and checked inline. It is intentionally *not* modelled with OpenZeppelin
+`AccessControl`. `AccessControl` maintains a single contract-wide `role => account`
+registry, so granting an `ARBITER_ROLE` would authorize that account against **every**
+escrow rather than the one it was named on — a privilege escalation, not a hardening.
+Per-escrow parties are relationship data, not global permissions.
+
+**Contract-wide operational authority** does use `AccessControl`. Its only capability is
+a `Pausable` circuit breaker over `deposit`, held by `PAUSER_ROLE`.
+
+That breaker is **inflow-only**: `release` and `refund` are never pausable, so no admin —
+including a compromised admin key — can freeze, seize, or strand ETH that is already
+escrowed. Funded escrows always stay settleable by their own parties. Both the Hardhat
+suite and the Foundry invariants assert this directly, and the constructor rejects a zero
+address so the breaker cannot be deployed unowned.
+
+The escrow remains **native-ETH only**. There is no token, and `SafeERC20` is therefore
+not used: adding it would mean inventing ERC-20 support the contract does not have.
 
 ## Run Against a Local EVM
 
@@ -87,16 +198,30 @@ page may exist.
 
 The deterministic benchmark indexes 10,000 fake-chain blocks and ABI logs into
 in-memory SQLite. Run `npm run benchmark`; the checked evidence and environment
-are recorded in [`evidence/benchmark.json`](evidence/benchmark.json). The
-recorded Node 24/Windows x64 run completed in 5.432 seconds (1,841 blocks and
-events per second). This measures local pipeline overhead, not JSON-RPC or
-mainnet throughput.
+are recorded in [`evidence/benchmark.json`](evidence/benchmark.json).
+
+The harness times five repetitions and reports a **range**, because a single figure
+overstates what this measurement can support. On the recorded Node 24 / Windows x64
+host, 10,000 blocks took **7.393s / 8.304s / 10.692s** (min / median / max), i.e.
+**935 / 1,204 / 1,353** blocks and events per second.
+
+The range is not incidental. While re-measuring, the *byte-identical* pipeline was
+observed between 550 and 1,960 blocks/s across consecutive runs on a contended host — a
+3.5x spread driven entirely by host CPU availability. An earlier revision of this README
+quoted 5.432s at 1,841 blocks/s from a single run; that value sits inside the observed
+spread and reflected a quiet host, not faster code. Correctness (10,000 blocks, 10,000
+events) is exact and asserted on every repetition.
+
+This measures in-process indexing, decoding, and SQLite commit overhead only — never
+JSON-RPC latency or mainnet throughput.
 
 ## Security Status
 
-The threat model documents expected failure modes and residual risks. The escrow
-uses defensive patterns and automated tests but **has not been externally
-audited**. Do not use it to custody production funds without independent review.
+The threat model documents expected failure modes and residual risks. The escrow builds
+on audited OpenZeppelin primitives and carries adversarial, fuzz, and invariant tests,
+but the escrow itself **has not been externally audited**. Using audited libraries is not
+the same as being audited. Do not use it to custody production funds without independent
+review.
 
 `npm audit --omit=dev` reports zero known production dependency vulnerabilities.
 The full development graph retains advisories in Hardhat 2 transitive packages;
