@@ -57,7 +57,15 @@ const deriveSigners = (count: number, rpcProvider: JsonRpcProvider): Signer[] =>
 
 beforeAll(async () => {
   node = await startDevNode(RPC_PORT);
-  provider = new JsonRpcProvider(node.url, CHAIN_ID, { staticNetwork: true });
+  // `cacheTimeout: -1` disables ethers' 250ms request coalescing. It must be off here:
+  // these suites mine and revert blocks far faster than that window, so a cached
+  // `eth_getTransactionCount` hands two consecutive sends the same nonce. That surfaced
+  // as an intermittent NONCE_EXPIRED in the reorg test, which submits two deposits
+  // back-to-back after `evm_revert` has rewound the account nonce.
+  provider = new JsonRpcProvider(node.url, CHAIN_ID, {
+    staticNetwork: true,
+    cacheTimeout: -1
+  });
   signers = deriveSigners(4, provider);
   // Surfaced so a CI log makes clear which backend actually ran.
   console.log(`real-node suite backend: ${node.kind} at ${node.url}`);
