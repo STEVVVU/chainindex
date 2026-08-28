@@ -32,7 +32,13 @@ const config: HardhatUserConfig = {
     tests: "./tests/contract"
   },
   mocha: {
-    timeout: 20_000
+    timeout: 20_000,
+    // Fail the run if Mocha encounters zero tests. Without this, `hardhat test`
+    // exits 0 and prints "0 passing" when discovery finds nothing -- so a renamed
+    // directory or a broken `paths.tests` would turn the contract tier green while
+    // asserting nothing. Verified: an empty tests directory exits 1 with this set,
+    // and 0 without it.
+    failZero: true
   }
 };
 
