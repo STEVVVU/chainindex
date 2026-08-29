@@ -72,3 +72,74 @@ jobs:
         run: forge test -vvv
         env:
           FOUNDRY_PROFILE: ci
+
+  # Container build. This job is the *only* verification the image gets: the development
+  # machine has the Docker CLI but no usable daemon, so the image is never built there.
+  # A green run here is the evidence that the Dockerfile and compose stack are valid.
+  container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # Validates compose syntax, image references, and volume/service wiring. Runs before
+      # the build so a malformed stack fails fast, and needs no daemon of its own.
+      - name: Validate the compose stack
+        run: docker compose config --quiet
+
+      - uses: docker/setup-buildx-action@v3
+
+      # push: false -- nothing is published anywhere. The build itself is the assertion:
+      # it runs `npm ci`, compiles better-sqlite3 from source, runs `tsc`, prunes to
+      # production dependencies, and then the Dockerfile's own RUN step proves the pruned
+      # tree still loads the native addon and contains dist/cli.js.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: chainindex:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Round-trip smoke: start the built image against no chain and assert the HTTP
+      # surface is actually served. `serve` binds the API before its first indexing pass,
+      # so /health and /metrics answer even though RPC_URL points at nothing -- which is
+      # precisely what makes this a test of the image rather than of a chain.
+      - name: Smoke the built image
+        run: |
+          docker run -d --name chainindex-smoke -p 3000:3000 \
+            -e RPC_URL=http://127.0.0.1:8545 \
+            -e CHAIN_ID=31337 \
+            -e CONTRACT_ADDRESS=0x1000000000000000000000000000000000000001 \
+            chainindex:ci
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:3000/health > /dev/null; then
+              echo "health ok after ${attempt} attempt(s)"
+              break
+            fi
+            if [ "${attempt}" -eq 30 ]; then
+              echo "image did not serve /health" >&2
+              docker logs chainindex-smoke >&2
+              exit 1
+            fi
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:3000/health | tee /dev/stderr | grep -q '"status":"ok"'
+          # Assert the indexer's own metrics are registered, not just that /metrics answers.
+          curl -fsS http://127.0.0.1:3000/metrics | grep -q 'chainindex_checkpoint_next_block'
+
+      - name: Container logs and teardown
+        if: always()
+        run: |
+          docker logs chainindex-smoke || true
+          docker rm -f chainindex-smoke || true
+
+      # The image must not run as root: it needs no privilege, and the compose stack mounts
+      # a writable volume into it. Asserted as "not uid 0" rather than a specific uid, so
+      # the check tests the security property and not a base-image implementation detail.
+      - name: Assert the image drops privileges
+        run: |
+          uid="$(docker run --rm --entrypoint id chainindex:ci -u)"
+          echo "runtime uid: ${uid}"
+          test "${uid}" -ne 0

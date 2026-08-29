@@ -1,0 +1,15 @@
+# Local scrape config for the compose stack. The indexer exposes prom-client metrics
+# on /metrics; the metric names are defined in src/metrics.ts.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: chainindex
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["indexer:3000"]
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
