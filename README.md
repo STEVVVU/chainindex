@@ -1,9 +1,9 @@
-# ChainIndex
+# Blockchain Indexer
 
-ChainIndex is a production-shaped EVM event indexing service paired with a small
-native-ETH escrow reference contract. It focuses on infrastructure work common
-to Web3 applications: canonical-chain tracking, replay-safe persistence,
-historical backfills, observable RPC handling, and contract settlement controls.
+A TypeScript blockchain event indexer that stores confirmed events, resumes
+from checkpoints, handles historical backfills, and rolls back safely during
+chain reorganizations. It also includes a small native-ETH escrow reference
+contract.
 It does not define or promote a token.
 
 ## Resume Summary
