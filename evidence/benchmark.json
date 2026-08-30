@@ -7,20 +7,20 @@
     "batchSize": 500,
     "storage": "SQLite :memory:",
     "confirmations": 0,
-    "repeats": 5
+    "repeats": 25
   },
   "result": {
     "indexedBlocks": 10000,
     "indexedEvents": 10000,
     "elapsedSeconds": {
-      "min": 7.393,
-      "median": 8.304,
-      "max": 10.692
+      "min": 4.1,
+      "median": 4.861,
+      "max": 9.454
     },
     "blocksPerSecond": {
-      "min": 935,
-      "median": 1204,
-      "max": 1353
+      "min": 1058,
+      "median": 2057,
+      "max": 2439
     }
   },
   "runtime": {

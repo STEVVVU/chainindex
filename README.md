@@ -26,7 +26,9 @@ It does not define or promote a token.
 - `src/provider/`: ethers JSON-RPC adapter, retry/rate wrapper, and fake chain.
 - `src/api.ts`: read-only event, checkpoint, backfill, health, and metrics routes.
 - `contracts/SafeEscrow.sol`: deposit, release, and refund lifecycle.
-- `tests/`: three test tiers (see [Testing](#testing)).
+- `tests/`: four test tiers (see [Testing](#testing)).
+- `Dockerfile` / `compose.yaml`: the container image and a local anvil + Prometheus +
+  Grafana stack (see [Container](#container)).
 
 See [architecture](docs/ARCHITECTURE.md) and
 [threat model](docs/THREAT_MODEL.md) for invariants and trust assumptions.
@@ -114,11 +116,19 @@ fake-provider tier is retained unchanged for fast, dependency-free feedback.
 
 ### Verification status
 
-`test:indexer`, `test:contract`, and `test:e2e` were run locally on Windows and pass;
-the E2E tier ran on the `hardhat node` backend, since Foundry is not installed on that
-machine. The **anvil backend and the `test:invariant` tier are verified in CI only** —
-they need `forge`/`anvil` on `PATH`, which the toolchain action provides. Install
-Foundry locally (`foundryup`) to run both here.
+Run locally on Windows (Node 24.16.0), all exit 0: `lint`, `typecheck`, `build`,
+`test:indexer` (9 passed), `test:contract` (15 passed), `test:e2e` (3 passed, repeated
+four times for flake), `benchmark`.
+
+Two things are **verified in CI only**, because this machine cannot verify them:
+
+| Not verified locally | Why | CI evidence |
+| --- | --- | --- |
+| anvil backend + `test:invariant` | `forge`/`anvil` are not installed here, so the E2E tier ran on the `hardhat node` fallback | `foundry-rs/foundry-toolchain@v1` in the `verify` and `invariant` jobs |
+| The container image | The Docker CLI is present but its daemon is unusable, so no image was ever built or run here | the `container` job builds it and smokes `/health` + `/metrics` |
+
+Install Foundry locally (`foundryup`) to run the Foundry tiers here. Nothing stronger is
+claimed about the image than "the CI job builds it" — see [Container](#container).
 
 ### Fuzz and invariant testing
 
@@ -179,6 +189,39 @@ curl "http://127.0.0.1:3000/metrics"
 its deployment block. The repository contains no keys, deployment receipts, or
 mainnet claims.
 
+## Container
+
+`Dockerfile` is a two-stage build: the builder carries node-gyp's prerequisites and
+compiles `better-sqlite3`, runs `tsc`, then prunes to production dependencies; the runtime
+stage copies only `node_modules` and `dist`, runs as the unprivileged `node` user, keeps
+SQLite on a `/data` volume, and health-checks `/health`. A build-time step instantiates
+the native addon so a broken build fails the image rather than crash-looping a container.
+
+`compose.yaml` brings up the whole local story: **anvil** (a real EVM node), a one-shot
+**deployer**, the **indexer**, **Prometheus**, and **Grafana** with a dashboard covering
+exactly the metrics `src/metrics.ts` exposes. The deployer exists because
+`CONTRACT_ADDRESS` and `START_BLOCK` cannot be hardcoded — the address depends on deployer
+nonce and the block on when the chain started — so it deploys, writes both to a shared
+volume, and the indexer sources them at startup. Every key is anvil's published test
+mnemonic and is labelled TEST ONLY.
+
+```bash
+docker compose up --build
+# indexer :3000/health · Prometheus :9090 · Grafana :3001
+```
+
+**Verification status: CI only.** The development machine has the Docker CLI but no usable
+daemon, so the image has never been built or run there, and this README makes no claim
+that it has. The `container` CI job is the evidence: it validates the compose stack
+(`docker compose config`), builds with `docker/setup-buildx-action` +
+`docker/build-push-action` (`push: false`), then starts the built image and asserts
+`/health` reports `"status":"ok"`, `/metrics` exposes `chainindex_*` series, and the
+runtime uid is not 0. What *was* checked locally, without a daemon: compose config parses
+and resolves 5 services, the deploy script passes `sh -n` and matches
+`constructor(address admin)`, and `/health` + `/metrics` answer before the first indexing
+pass — confirmed by running `dist/cli.js serve` natively against an unreachable RPC URL,
+the same state the smoke step exercises.
+
 ## Backfill and Reorg Behavior
 
 Backfill jobs persist their inclusive range and next block. Re-running the same
@@ -200,17 +243,30 @@ The deterministic benchmark indexes 10,000 fake-chain blocks and ABI logs into
 in-memory SQLite. Run `npm run benchmark`; the checked evidence and environment
 are recorded in [`evidence/benchmark.json`](evidence/benchmark.json).
 
-The harness times five repetitions and reports a **range**, because a single figure
+The harness times repeated runs and reports a **range**, because a single figure
 overstates what this measurement can support. On the recorded Node 24 / Windows x64
-host, 10,000 blocks took **7.393s / 8.304s / 10.692s** (min / median / max), i.e.
-**935 / 1,204 / 1,353** blocks and events per second.
+host, 25 repetitions of 10,000 blocks took **4.100s / 4.861s / 9.454s**
+(min / median / max), i.e. **1,058 / 2,057 / 2,439** blocks and events per second.
 
-The range is not incidental. While re-measuring, the *byte-identical* pipeline was
-observed between 550 and 1,960 blocks/s across consecutive runs on a contended host — a
-3.5x spread driven entirely by host CPU availability. An earlier revision of this README
-quoted 5.432s at 1,841 blocks/s from a single run; that value sits inside the observed
-spread and reflected a quiet host, not faster code. Correctness (10,000 blocks, 10,000
-events) is exact and asserted on every repetition.
+**These figures are host variance, not a code change.** `git diff` over `src/` and
+`benchmarks/` between the revision that recorded the previous numbers and this one is
+empty — the pipeline is byte-identical, so the ~1.7x faster median (1,204 → 2,057
+blocks/s) measures a quieter machine and nothing else. It is reported because a stale
+figure is worse than a re-measured one, not as an improvement.
+
+The range is the point. Across four independent 25-repetition batches on this host the
+median ranged 4.4–6.6s and single repetitions spanned **1.855s to 66.2s** — the 66s
+outlier was one OS-level stall, and it is quoted rather than discarded because it is what
+the tail actually looks like here. A within-process probe (20 consecutive repetitions,
+logging heap) showed no monotonic drift and a normal GC sawtooth, which is what rules out
+a leak in the harness and pins the spread on host CPU availability. An earlier revision of
+this README quoted 5.432s at 1,841 blocks/s from a single run; that value sits inside the
+observed spread. Correctness (10,000 blocks, 10,000 events) is exact and asserted on every
+repetition.
+
+The measurement box is a power-managed laptop with unpinned clocks, so treat the median as
+indicative of pipeline overhead on a comparable host and the range as the real
+uncertainty. Republishing on a quiesced machine would tighten it.
 
 This measures in-process indexing, decoding, and SQLite commit overhead only — never
 JSON-RPC latency or mainnet throughput.
