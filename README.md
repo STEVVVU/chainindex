@@ -117,8 +117,8 @@ fake-provider tier is retained unchanged for fast, dependency-free feedback.
 ### Verification status
 
 Run locally on Windows (Node 24.16.0), all exit 0: `lint`, `typecheck`, `build`,
-`test:indexer` (9 passed), `test:contract` (15 passed), `test:e2e` (3 passed, repeated
-four times for flake), `benchmark`.
+`test:indexer` (9 passed), `test:contract` (15 passed), `test:e2e` (3 passed, run six
+times to check for flake), `benchmark`.
 
 Two things are **verified in CI only**, because this machine cannot verify them:
 
