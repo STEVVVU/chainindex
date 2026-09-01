@@ -16,6 +16,7 @@
     "tests/indexer/**/*.ts",
     "tests/e2e/**/*.ts",
     "benchmarks/**/*.ts",
+    "scripts/**/*.ts",
     "hardhat.config.ts",
     "vitest.e2e.config.ts"
   ]
