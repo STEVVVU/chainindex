@@ -1,0 +1,47 @@
+# Line-ending policy.
+#
+# Every text file is stored with LF in the index and checked out with LF, on every
+# platform. Without this file the result depends on each developer's local
+# `core.autocrlf`, which means the repo's correctness rests on machine configuration
+# that is not part of the repo. This makes it repo state instead.
+#
+# It matters here beyond tidiness:
+#   - scripts/deploy-escrow.sh and the Dockerfile's RUN steps are executed by Linux
+#     shells (in CI and in the container). A CRLF-checked-out shell script fails with
+#     the classic `\r: command not found` / `#!/usr/bin/env bash\r` no-such-file error.
+#   - Solidity artifacts and the bytecode compiled from contracts/ are hashed, so a
+#     line-ending change to a .sol file silently changes compiler output.
+#   - evidence/benchmark.json is committed and diffed by hand; a wholesale CRLF
+#     rewrite would bury real changes in noise.
+#
+# `text=auto` is deliberately not used: it lets Git guess per file. The explicit
+# `eol=lf` below applies the same rule to everything, so there is nothing to guess.
+* text eol=lf
+
+# Binary files: never normalize, never diff as text. The repo tracks no binary assets
+# today, so these are declared up front for the ones a project like this acquires --
+# docs images, fonts, compiled native addons and wasm. Listing them now means the first
+# such file added cannot be corrupted by normalization on the way in.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.pdf   binary
+*.woff  binary
+*.woff2 binary
+*.ttf   binary
+*.otf   binary
+*.wasm  binary
+*.node  binary
+*.gz    binary
+*.zip   binary
+*.sqlite binary
+
+# SVG is text (it is XML) and should normalize like any other source file, but diffing
+# it line by line is rarely useful. Keep it normalized, mark it non-diffable.
+*.svg   text eol=lf -diff
+
+# Generated and hand-maintained lockfile. Normalized like everything else, but excluded
+# from diffs so a dependency bump does not swamp review with thousands of lines.
+package-lock.json text eol=lf -diff linguist-generated
