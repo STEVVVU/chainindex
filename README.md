@@ -82,6 +82,11 @@ not download a compiler after dependencies are installed. `foundry.toml` pins th
 same 0.8.28, and CI asserts both toolchains compile against it — if you change the
 pin, change it in both places.
 
+`.gitattributes` pins every text file to LF in the index and on checkout, so this works
+identically on Windows without relying on a local `core.autocrlf` setting. That is not
+cosmetic: `scripts/deploy-escrow.sh` and the Dockerfile's `RUN` steps are run by Linux
+shells, and a CRLF checkout breaks them with `\r: command not found`.
+
 ## Testing
 
 Four tiers, each covering what the others cannot:
@@ -129,6 +134,31 @@ Two things are **verified in CI only**, because this machine cannot verify them:
 
 Install Foundry locally (`foundryup`) to run the Foundry tiers here. Nothing stronger is
 claimed about the image than "the CI job builds it" — see [Container](#container).
+
+### Guarding against a vacuous pass
+
+A test suite that stops finding its tests reports success. Each tier is guarded so that
+cannot happen quietly:
+
+| Tier | Guard | Failure it catches |
+| --- | --- | --- |
+| `test:contract` (Mocha) | `mocha.failZero` in `hardhat.config.ts` | `hardhat test` exits 0 printing "0 passing" when `paths.tests` finds nothing |
+| `test:indexer`, `test:e2e` (Vitest) | a count floor — `scripts/assert-test-floor.ts` | a tier that shrinks without anyone noticing |
+
+The two tools need different guards. Vitest 4 already exits non-zero on a *total*
+collection failure, so it needs no `failZero` equivalent; what it does not catch is
+**partial** loss. Renaming one file out of `tests/indexer` leaves the run green at
+"8 passed" instead of 9. The floor asserts a minimum count of *passing* tests, which
+catches a shrunken tier and mass-`.skip` alike, and subsumes the zero-test case.
+
+The floor is a ratchet: adding tests never trips it. When a tier legitimately shrinks,
+lower `--min` in `package.json` in the same commit that removes the tests, so the
+deletion is visible in review.
+
+Every guard here was **negative-tested** — confirmed to fail when it should, since a
+guard never seen to fail is indistinguishable from no guard. Verified by renaming a test
+file away (exit 0 before the floor, 1 after), pointing an `include` glob at a
+nonexistent directory, and `.skip`ping a single test in each tier.
 
 ### Fuzz and invariant testing
 
@@ -267,6 +297,18 @@ repetition.
 The measurement box is a power-managed laptop with unpinned clocks, so treat the median as
 indicative of pipeline overhead on a comparable host and the range as the real
 uncertainty. Republishing on a quiesced machine would tighten it.
+
+**These numbers are not CI-verified, by design.** `evidence/benchmark.json` records a
+10,000-block, 25-repetition workload measured on the host above, while CI runs
+`BENCHMARK_BLOCKS=2000` — a *different, smaller* workload — and never diffs the evidence
+file afterwards. So CI checks that the benchmark still **runs and stays correct**; it
+structurally cannot contradict the timings published here. That is deliberate: shared CI
+runners have noisy neighbours and unpinned clocks, so a timing assertion there would
+either flake constantly or have to be loosened until it asserted nothing. The tradeoff is
+stated rather than left implicit, because the alternative is a reader assuming a green
+badge validates the figures. Treat the timings as **a single host's measurement, reported
+with its spread** — reproduce them with `npm run benchmark` on your own hardware, which is
+the only thing that makes them mean anything for you.
 
 This measures in-process indexing, decoding, and SQLite commit overhead only — never
 JSON-RPC latency or mainnet throughput.
